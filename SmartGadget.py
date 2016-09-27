@@ -28,6 +28,7 @@ import time
 
 import pygatt
 
+
 class BLEAdapter(object):
     """
     Adapter for PyGatt default initialization and device scan.
@@ -56,7 +57,7 @@ class BLEAdapter(object):
         self.adapter = None
 
         for k in self.config.keys():
-            if kwargs.has_key(k):
+            if k in kwargs:
                 self.config[k] = kwargs[k]
 
         if self.config['pygatt_debug']:
@@ -81,10 +82,9 @@ class BLEAdapter(object):
 
         statement.)
         """
-        self.adapter = pygatt.GATTToolBackend(
-                hci_device=self.config['hci_device'],
-                cli_options=self.config['cli_options'])
-        self.adapter.start(reset_on_start=self.config['reset_on_start'])
+        self.adapter = pygatt.BluezBackend(
+                hci_device=self.config['hci_device'])
+        self.adapter.start()
 
     def stop(self):
         if self.adapter:
@@ -121,8 +121,7 @@ class BLEAdapter(object):
         """
         if duration == -1:
             duration = self.config['scan_duration_sec']
-        return self.adapter.scan(timeout=duration,
-                                 run_as_root=self.config['run_as_root'])
+        return self.adapter.scan(timeout=duration)
 
 
 class HumiGadget(object):
@@ -137,7 +136,9 @@ class HumiGadget(object):
     TEMP_FORMAT = ['time', 'temperature']
     RHT_FORMAT  = ['time', 'temperature', 'humidity']
     BAT_FORMAT  = ['time', 'battery']
-    GADGET_NAMES = ['SHTC1', 'Smart']
+    SHTC1_NAME = 'SHTC1 smart gadget'
+    SHT3X_NAME = 'Smart Humigadget'
+    GADGET_NAMES = [SHTC1_NAME, SHT3X_NAME]
 
     BAT_SRVC_UUID = '0000180f-0000-1000-8000-00805f9b34fb'
     BAT_CHAR_UUID = '00002a19-0000-1000-8000-00805f9b34fb'
@@ -145,18 +146,18 @@ class HumiGadget(object):
 
     @staticmethod
     def filter_smartgadgets(devicelist):
-        return [dev for dev in devicelist if dev['name'] in
-                HumiGadget.GADGET_NAMES]
+        return [dev for dev in devicelist
+                if 'Name' in dev and dev['Name'] in HumiGadget.GADGET_NAMES]
 
     @staticmethod
     def create(device, ble=None):
-        if device['name'] == 'SHTC1':
-            return SHTC1HumiGadget(device['address'], ble)
-        if device['name'] == 'Smart':
-            return SHT3xHumiGadget(device['address'], ble)
+        if device['Name'] == HumiGadget.SHTC1_NAME:
+            return SHTC1HumiGadget(device['Address'], ble)
+        if device['Name'] == HumiGadget.SHT3X_NAME:
+            return SHT3xHumiGadget(device['Address'], ble)
         return None
 
-    def __init__(self, address, ble=None):
+    def __init__(self, address, ble=None, *args, **kwargs):
         self.address = address
         self.rht_callbacks = []
         if ble is None:
@@ -317,8 +318,8 @@ class SHT3xHumiGadget(HumiGadget):
     LOG_INTV_CHAR_UUID = '0000f239-b38d-4985-720e-0f993a68ee41'
     LOG_INTV_FORMAT = ['time', 'log_interval']
 
-    def __init__(self, **kwargs):
-        super(HumiGadget, self).__init__(kwargs)
+    def __init__(self, *args, **kwargs):
+        super(SHT3xHumiGadget, self).__init__(*args, **kwargs)
         self._current_rht = {}
 
     @property
@@ -359,14 +360,14 @@ class SHT3xHumiGadget(HumiGadget):
             key = 'humidity'
         self._current_rht['time'] = ts
         self._current_rht[key] = val
-        if (self._current_rht.has_key('temperature') and
-                self._current_rht.has_key('humidity')):
+        if ('temperature' in self._current_rht and
+                'humidity' in self._current_rhty):
             for s in self.rht_callbacks:
                 s(self._current_rht)
             self._current_rht = {}
 
     def subscribe(self, callback):
-        if not callback in self.rht_callbacks:
+        if callback not in self.rht_callbacks:
             self.rht_callbacks.append(callback)
 
         if len(self.rht_callbacks) == 1:
@@ -423,7 +424,7 @@ class SHTC1HumiGadget(HumiGadget):
             s(cur_rht)
 
     def subscribe(self, callback):
-        if not callback in self.rht_callbacks:
+        if callback not in self.rht_callbacks:
             self.rht_callbacks.append(callback)
 
         if len(self.rht_callbacks) == 1:
