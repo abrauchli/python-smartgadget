@@ -198,7 +198,12 @@ class HumiGadget(object):
                       'zip_keys[i]': unpacked_value[i]
                   } or None on error
         """
-        data = self._con.char_read(uuid, timeout=10)
+        try:
+            data = self._con.char_read(uuid, timeout=10)
+        except Exception as e:
+            print("Exception in read_characteristic {0}:", uuid)
+            print(e)
+            return None
         if data is None:
             return None
         zip_vals = [time.time()]
@@ -313,8 +318,8 @@ class SHT3xHumiGadget(HumiGadget):
 
     TEMP_SRVC_UUID = '00002234-b38d-4985-720e-0f993a68ee41'
     HUMI_SRVC_UUID = '00001234-b38d-4985-720e-0f993a68ee41'
-    TEMP_NOTI_UUID = '00002235-b38d-4985-720e-0f993a68ee41'
-    HUMI_NOTI_UUID = '00001235-b38d-4985-720e-0f993a68ee41'
+    TEMP_NOTI_UUID = '00001235-b38d-4985-720e-0f993a68ee41'
+    HUMI_NOTI_UUID = '00002235-b38d-4985-720e-0f993a68ee41'
     LOG_INTV_CHAR_UUID = '0000f239-b38d-4985-720e-0f993a68ee41'
     LOG_INTV_FORMAT = ['time', 'log_interval']
 
