@@ -1,1 +1,2 @@
-pygatt[gatttool]>=2.1.0
+pydbus>=0.6.0
+pygatt[bluez]>=2.1.0

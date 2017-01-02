@@ -16,17 +16,17 @@ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
 CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
 IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 OF SUCH DAMAGE.
-
-Written by Andreas Brauchli <andreas.brauchli@sensirion.com> based
-on code by Kristian Baumann <kristian.baumann@sensirion.com>
 """
 
 from __future__ import print_function
 
+import logging
 import struct
 import time
 
 import pygatt
+
+log = logging.getLogger(__name__)
 
 
 class BLEAdapter(object):
@@ -44,9 +44,6 @@ class BLEAdapter(object):
     >>> ble.stop()
     """
     config = {
-        'run_as_root'       : False,
-        'reset_on_start'    : False,
-        'cli_options'       : None,
         'address_type'      : 'random', # default 'public'
         'hci_device'        : 'hci0',
         'scan_duration_sec' : 2.0,
@@ -92,7 +89,7 @@ class BLEAdapter(object):
 
     def connect(self, address, address_type=None, timeout=10):
         """
-        Connect to device (synchroneous)
+        Connect to device (synchronous)
 
         :param address: device address as string e.g. '12:34:56:78:9A'
         :param address_type: None (default), 'public' or 'random'
@@ -105,7 +102,7 @@ class BLEAdapter(object):
 
     def disconnect(self, address=None):
         """
-        Disconnect from device (asynchroneous)
+        Disconnect from device (asynchronous)
 
         :param address: device address as string e.g. '12:34:56:78:9A' or None
                         to disconnect from all devices.
@@ -114,7 +111,7 @@ class BLEAdapter(object):
 
     def scan(self, duration=-1):
         """
-        Start device discovery scan (synchroneous)
+        Start device discovery scan (synchronous)
 
         :param duration: scan duration in sec (Default -1: use default duration)
         :returns: a list of (address, name) tuples
@@ -153,16 +150,20 @@ class HumiGadget(object):
     def create(device, ble=None):
         if device['Name'] == HumiGadget.SHTC1_NAME:
             return SHTC1HumiGadget(device['Address'], ble)
+
         if device['Name'] == HumiGadget.SHT3X_NAME:
             return SHT3xHumiGadget(device['Address'], ble)
+
         return None
 
     def __init__(self, address, ble=None, *args, **kwargs):
         self.address = address
         self.rht_callbacks = []
+
         if ble is None:
             ble = BLEAdapter()
             ble.start()
+
         self.ble = ble
         self._con = None
 
@@ -176,22 +177,25 @@ class HumiGadget(object):
     def connect(self):
         if not self._con:
             self.rht_callbacks = []
-            self._con = ble.connect(self.address, address_type=self.ADDRESS_TYPE)
+            self._con = self.ble.connect(self.address,
+                                         address_type=self.ADDRESS_TYPE)
 
     def disconnect(self):
         if self._con:
             if self.rht_callbacks:
                 self.unsubscribe()
+
             self._con.disconnect()
+
         self._con = None
         self.rht_callbacks = []
 
     def read_characteristic(self, uuid, unpack, zip_keys):
         """
-        Read a characteristic by UUID, unpack values and zip the result.
+        Read a characteristic by UUID, unpack values and zip the result
 
         :param unpack: can either be a format string to `struct.unpack' or a
-                       callback that takes a data string and return an iterable.
+                       callback that takes a data string and return an iterable
 
         :returns: a dict with zip_keys: {
                       'zip_keys[0]': timestamp,
@@ -200,12 +204,15 @@ class HumiGadget(object):
         """
         try:
             data = self._con.char_read(uuid, timeout=10)
-        except Exception as e:
-            print("Exception in read_characteristic {0}:", uuid)
-            print(e)
+            print("Read_characteristic ", uuid, unpack, data)
+
+        except Exception:
+            log.exception("Exception in read_characteristic: %s", uuid)
             return None
+
         if data is None:
             return None
+
         zip_vals = [time.time()]
         if isinstance(unpack, str):
             zip_vals.extend(struct.unpack(unpack, data))
@@ -240,11 +247,10 @@ class HumiGadget(object):
         """
         raise NotImplementedError()
 
-    # @property
-    # def rssi(self):
-    #     # PyGatt raises NotImplementedException
-    #     rssi = (time.time(), self._con.get_rssi())
-    #     return dict(zip(self.RRSI_FORMAT, rssi))
+    @property
+    def rssi(self):
+        rssi = (time.time(), self._con.get_rssi())
+        return dict(zip(self.RSSI_FORMAT, rssi))
 
     @property
     def connected(self):
@@ -318,8 +324,8 @@ class SHT3xHumiGadget(HumiGadget):
 
     TEMP_SRVC_UUID = '00002234-b38d-4985-720e-0f993a68ee41'
     HUMI_SRVC_UUID = '00001234-b38d-4985-720e-0f993a68ee41'
-    TEMP_NOTI_UUID = '00001235-b38d-4985-720e-0f993a68ee41'
-    HUMI_NOTI_UUID = '00002235-b38d-4985-720e-0f993a68ee41'
+    TEMP_NOTI_UUID = '00002235-b38d-4985-720e-0f993a68ee41'
+    HUMI_NOTI_UUID = '00001235-b38d-4985-720e-0f993a68ee41'
     LOG_INTV_CHAR_UUID = '0000f239-b38d-4985-720e-0f993a68ee41'
     LOG_INTV_FORMAT = ['time', 'log_interval']
 
@@ -355,18 +361,22 @@ class SHT3xHumiGadget(HumiGadget):
                                          bytearray(struct.pack('<i',
                                                                interval_ms)))
 
-    def _on_float_value(self, handle, data):
+    def _on_propchange(self, iface, changed, invalidated,
+                       service=None, uuid=None):
+        if 'Value' not in changed:
+            return
         ts = time.time()
+        data = bytearray(changed['Value'])
         val = struct.unpack('<f', data)[0]
         key = 'value'
-        if handle == self._con.get_handle(self.TEMP_SRVC_UUID):
+        if uuid == self.TEMP_NOTI_UUID:
             key = 'temperature'
-        elif handle == self._con.get_handle(self.HUMI_SRVC_UUID):
+        elif uuid == self.HUMI_NOTI_UUID:
             key = 'humidity'
         self._current_rht['time'] = ts
         self._current_rht[key] = val
         if ('temperature' in self._current_rht and
-                'humidity' in self._current_rhty):
+                'humidity' in self._current_rht):
             for s in self.rht_callbacks:
                 s(self._current_rht)
             self._current_rht = {}
@@ -378,8 +388,8 @@ class SHT3xHumiGadget(HumiGadget):
         if len(self.rht_callbacks) == 1:
             # start service subscription with the first bound callback
             self._current_rht = {}
-            self.subscribe_service(self.TEMP_NOTI_UUID, self._on_float_value)
-            self.subscribe_service(self.HUMI_NOTI_UUID, self._on_float_value)
+            self.subscribe_service(self.TEMP_NOTI_UUID, self._on_propchange)
+            self.subscribe_service(self.HUMI_NOTI_UUID, self._on_propchange)
 
     def unsubscribe(self, callback=None):
         if not self.rht_callbacks:
@@ -466,15 +476,43 @@ if __name__ == '__main__':
         print(devices)
 
         # # Manually set devices
-        # devices = [
-        #     {'address': 'BC:6A:29:C1:B4:D1', 'name': 'SHTC1'},
-        #     {'address': 'DC:01:F6:33:D7:42', 'name': 'Smart'}
-        # ]
+        devices = [
+        #     {'Address': 'BC:6A:29:C1:B4:D1', 'Name': 'SHTC1'},
+        #    {'Address': 'DC:01:F6:33:D7:42', 'Name': 'Smart Humigadget'}
+        {'Name': 'Smart Humigadget', 'Paired': False, 'ServicesResolved':
+                 False, 'Adapter': '/org/bluez/hci0', 'Appearance': 512,
+                 'LegacyPairing': False, 'Alias': 'Smart Humigadget',
+                 'Connected': False, 'UUIDs':
+                 ['00001234-b38d-4985-720e-0f993a68ee41',
+                     '00001800-0000-1000-8000-00805f9b34fb',
+                     '00001801-0000-1000-8000-00805f9b34fb',
+                     '0000180a-0000-1000-8000-00805f9b34fb',
+                     '0000180f-0000-1000-8000-00805f9b34fb',
+                     '00002234-b38d-4985-720e-0f993a68ee41',
+                     '0000f234-b38d-4985-720e-0f993a68ee41'], 'Address':
+                 'DC:01:F6:33:D7:42', 'Trusted': False, 'Blocked': False}
+        ]
+
         for dev in devices:
+            print("{}: {}".format(dev['Name'], dev['Address']))
+            #try:
             with HumiGadget.create(dev, ble) as gadget:
+                print("Connected ... rssi, bat, rht, log intv")
+                print(gadget.rssi)
                 print(gadget.battery)
                 print(gadget.humidity_and_temperature)
+
                 if isinstance(gadget, SHT3xHumiGadget):
                     print(gadget.log_interval)
+
+                # print("Setting log interval (erases log)")
+                # gadget.log_interval = 5000
+                print("Subscribing")
                 gadget.subscribe(lambda rht: print(rht))
-                time.sleep(20)
+                time.sleep(70)
+
+            #except KeyboardInterrupt:
+            #    break
+            #except Exception as e:
+            #    print(e)
+            #    raise e
