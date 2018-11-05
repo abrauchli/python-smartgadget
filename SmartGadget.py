@@ -1,7 +1,7 @@
 #!/usr/bin/env python2.7
 # -*- coding: utf-8 -*-
 """
-(c) Copyright 2016 Sensirion AG, Switzerland
+(c) Copyright 2018, Andreas Brauchli
 
 Software and algorithms are provided "AS IS" and any and
 all express or implied warranties are disclaimed.
@@ -461,7 +461,10 @@ class SHTC1HumiGadget(HumiGadget):
 
 
 if __name__ == '__main__':
-    # General usage Tips:
+    # TODO: REMOVE THIS SECTION WHEN THE MOVE TO PYGATT-BLUEZ IS COMPLETE
+    # AS PYGATT-GATTTOOL MAY NOT BE WORKING ANYMORE, USE PYGATT-BLUEZ
+    #
+    # General usage tips when running with the gatttool pygatt backend:
     # Run this command to allow LE scan as unprivileged user
     # sudo setcap 'cap_net_raw,cap_net_admin+eip' `which hcitool`
     # When running into scanning issues or connection timeouts try restarting
@@ -471,27 +474,28 @@ if __name__ == '__main__':
     # sudo systemctl restart bluetooth   # for systemd (Ubuntu >= 16.04)
     #
     with BLEAdapter() as ble:
-        # Scan devices
+        # # Scan devices
         devices = HumiGadget.filter_smartgadgets(ble.scan())
+        print("Devices:")
         print(devices)
 
-        # # Manually set devices
-        devices = [
-        #     {'Address': 'BC:6A:29:C1:B4:D1', 'Name': 'SHTC1'},
-        #    {'Address': 'DC:01:F6:33:D7:42', 'Name': 'Smart Humigadget'}
-        {'Name': 'Smart Humigadget', 'Paired': False, 'ServicesResolved':
-                 False, 'Adapter': '/org/bluez/hci0', 'Appearance': 512,
-                 'LegacyPairing': False, 'Alias': 'Smart Humigadget',
-                 'Connected': False, 'UUIDs':
-                 ['00001234-b38d-4985-720e-0f993a68ee41',
-                     '00001800-0000-1000-8000-00805f9b34fb',
-                     '00001801-0000-1000-8000-00805f9b34fb',
-                     '0000180a-0000-1000-8000-00805f9b34fb',
-                     '0000180f-0000-1000-8000-00805f9b34fb',
-                     '00002234-b38d-4985-720e-0f993a68ee41',
-                     '0000f234-b38d-4985-720e-0f993a68ee41'], 'Address':
-                 'DC:01:F6:33:D7:42', 'Trusted': False, 'Blocked': False}
-        ]
+        # # # Manually set devices
+        # devices = [
+        # #     {'Address': 'BC:6A:29:C1:B4:D1', 'Name': 'SHTC1'},
+        # #    {'Address': 'DC:01:F6:33:D7:42', 'Name': 'Smart Humigadget'}
+        # {'Name': 'Smart Humigadget', 'Paired': False, 'ServicesResolved':
+        #          False, 'Adapter': '/org/bluez/hci0', 'Appearance': 512,
+        #          'LegacyPairing': False, 'Alias': 'Smart Humigadget',
+        #          'Connected': False, 'UUIDs':
+        #          ['00001234-b38d-4985-720e-0f993a68ee41',
+        #              '00001800-0000-1000-8000-00805f9b34fb',
+        #              '00001801-0000-1000-8000-00805f9b34fb',
+        #              '0000180a-0000-1000-8000-00805f9b34fb',
+        #              '0000180f-0000-1000-8000-00805f9b34fb',
+        #              '00002234-b38d-4985-720e-0f993a68ee41',
+        #              '0000f234-b38d-4985-720e-0f993a68ee41'], 'Address':
+        #          'DC:01:F6:33:D7:42', 'Trusted': False, 'Blocked': False}
+        # ]
 
         for dev in devices:
             print("{}: {}".format(dev['Name'], dev['Address']))
