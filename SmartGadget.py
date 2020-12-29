@@ -1,7 +1,6 @@
-#!/usr/bin/env python2.7
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 """
-(c) Copyright 2018, Andreas Brauchli
+(c) Copyright 2020, Andreas Brauchli
 
 Software and algorithms are provided "AS IS" and any and
 all express or implied warranties are disclaimed.
@@ -18,110 +17,31 @@ IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
 OF SUCH DAMAGE.
 """
 
-from __future__ import print_function
-
+import asyncio
 import logging
-import struct
 import time
+import struct
+from bleak import BleakClient, BleakScanner
 
-import pygatt
+
+def detection_callback(device, advertisement_data):
+    print("{}: {} ({}) - advertisement_data: {}".format(device.address, device.name, device.rssi, advertisement_data))
+
+
+async def scan():
+    scanner = BleakScanner()
+    scanner.register_detection_callback(detection_callback)
+
+    await scanner.start()
+    await asyncio.sleep(3.0)
+    await scanner.stop()
+    return await scanner.get_discovered_devices()
+
 
 log = logging.getLogger(__name__)
 
 
-class BLEAdapter(object):
-    """
-    Adapter for PyGatt default initialization and device scan.
-
-    Usage: automatic resource management
-    >>> with BLEAdapter() as ble: ...
-
-    or manually managed with
-
-    >>> ble = BLEAdapter()
-    >>> ble.start()
-    >>> # ...
-    >>> ble.stop()
-    """
-    config = {
-        'address_type'      : 'random', # default 'public'
-        'hci_device'        : 'hci0',
-        'scan_duration_sec' : 2.0,
-        'pygatt_debug'      : True,
-    }
-
-    def __init__(self, **kwargs):
-        self.adapter = None
-
-        for k in self.config.keys():
-            if k in kwargs:
-                self.config[k] = kwargs[k]
-
-        if self.config['pygatt_debug']:
-            import logging
-            logging.basicConfig()
-            logging.getLogger(pygatt.__name__).setLevel(logging.DEBUG)
-
-    def __enter__(self):
-        self.start()
-        return self
-
-    def __exit__(self, type_cls, value, traceback):
-        self.stop()
-
-    def start(self):
-        """
-        Start the adapter (interactive gatttool session).
-        Start should only be called when creating the object wihout automatic
-        resource control (i.e. when _not_ using the
-
-        >>> with BLEAdapater() as ble:
-
-        statement.)
-        """
-        self.adapter = pygatt.BluezBackend(
-                hci_device=self.config['hci_device'])
-        self.adapter.start()
-
-    def stop(self):
-        if self.adapter:
-            self.adapter.stop()
-
-    def connect(self, address, address_type=None, timeout=10):
-        """
-        Connect to device (synchronous)
-
-        :param address: device address as string e.g. '12:34:56:78:9A'
-        :param address_type: None (default), 'public' or 'random'
-        :param timeout: connection timeout in sec (Default 10)
-        """
-        if address_type is None:
-            address_type = self.config['address_type']
-        return self.adapter.connect(address, timeout=timeout,
-                                    address_type=address_type)
-
-    def disconnect(self, address=None):
-        """
-        Disconnect from device (asynchronous)
-
-        :param address: device address as string e.g. '12:34:56:78:9A' or None
-                        to disconnect from all devices.
-        """
-        self.adapter.disconnect()
-
-    def scan(self, duration=-1):
-        """
-        Start device discovery scan (synchronous)
-
-        :param duration: scan duration in sec (Default -1: use default duration)
-        :returns: a list of (address, name) tuples
-        """
-        if duration == -1:
-            duration = self.config['scan_duration_sec']
-        return self.adapter.scan(timeout=duration)
-
-
-class HumiGadget(object):
+class HumiGadget:
     """
     Representation of a Sensirion SmartHumiGadget.
 
@@ -131,8 +51,8 @@ class HumiGadget(object):
     RSSI_FORMAT = ['time', 'rssi']
     HUMI_FORMAT = ['time', 'humidity']
     TEMP_FORMAT = ['time', 'temperature']
-    RHT_FORMAT  = ['time', 'temperature', 'humidity']
-    BAT_FORMAT  = ['time', 'battery']
+    RHT_FORMAT = ['time', 'temperature', 'humidity']
+    BAT_FORMAT = ['time', 'battery']
     SHTC1_NAME = 'SHTC1 smart gadget'
     SHT3X_NAME = 'Smart Humigadget'
     GADGET_NAMES = [SHTC1_NAME, SHT3X_NAME]
@@ -144,28 +64,34 @@ class HumiGadget(object):
     @staticmethod
     def filter_smartgadgets(devicelist):
         return [dev for dev in devicelist
-                if 'Name' in dev and dev['Name'] in HumiGadget.GADGET_NAMES]
+                if dev.name in HumiGadget.GADGET_NAMES]
 
     @staticmethod
-    def create(device, ble=None):
-        if device['Name'] == HumiGadget.SHTC1_NAME:
-            return SHTC1HumiGadget(device['Address'], ble)
+    def create(device, client=None, loop=None):
+        """Factory method for creating a humigadget from a BLE Device"""
+        if device.name == HumiGadget.SHTC1_NAME:
+            return SHTC1HumiGadget(device, client, loop)
 
-        if device['Name'] == HumiGadget.SHT3X_NAME:
-            return SHT3xHumiGadget(device['Address'], ble)
+        if device.name == HumiGadget.SHT3X_NAME:
+            return SHT3xHumiGadget(device, client, loop)
 
         return None
 
-    def __init__(self, address, ble=None, *args, **kwargs):
-        self.address = address
+    def __init__(self, device, client=None, loop=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.device = device
+
+        # self.device.get_rssi() is only available on MacOS at the time of
+        # writing, so we keep it static
+        rssi = (time.time(), self.device.rssi)
+        self._rssi = dict(zip(self.RSSI_FORMAT, rssi))
+
+        self._client = client or BleakClient(device)
+        self._client.set_disconnected_callback(self._disconnected_client)
+
+        self._loop = loop or asyncio.get_event_loop()
+
         self.rht_callbacks = []
-
-        if ble is None:
-            ble = BLEAdapter()
-            ble.start()
-
-        self.ble = ble
-        self._con = None
 
     def __enter__(self):
         self.connect()
@@ -174,23 +100,23 @@ class HumiGadget(object):
     def __exit__(self, type_cls, value, traceback):
         self.disconnect()
 
+    def _disconnected_client(self, client):
+        self._client = None
+
     def connect(self):
-        if not self._con:
-            self.rht_callbacks = []
-            self._con = self.ble.connect(self.address,
-                                         address_type=self.ADDRESS_TYPE)
+        return self._loop.run_until_complete(self._client.connect())
 
     def disconnect(self):
-        if self._con:
+        if self._client:
             if self.rht_callbacks:
                 self.unsubscribe()
 
-            self._con.disconnect()
+            return self._loop.run_until_complete(self._client.disconnect())
 
-        self._con = None
+        self._client = None
         self.rht_callbacks = []
 
-    def read_characteristic(self, uuid, unpack, zip_keys):
+    async def read_characteristic(self, uuid, unpack, zip_keys):
         """
         Read a characteristic by UUID, unpack values and zip the result
 
@@ -203,7 +129,7 @@ class HumiGadget(object):
                   } or None on error
         """
         try:
-            data = self._con.char_read(uuid, timeout=10)
+            data = await self._client.read_gatt_char(uuid)
             print("Read_characteristic ", uuid, unpack, data)
 
         except Exception:
@@ -248,9 +174,12 @@ class HumiGadget(object):
         raise NotImplementedError()
 
     @property
+    def address(self):
+        return self.device.address
+
+    @property
     def rssi(self):
-        rssi = (time.time(), self._con.get_rssi())
-        return dict(zip(self.RSSI_FORMAT, rssi))
+        return self._rssi
 
     @property
     def connected(self):
@@ -259,7 +188,7 @@ class HumiGadget(object):
 
         :returns: True if the gadget is connected, False otherwise
         """
-        return bool(self._con)
+        return self._client.is_connected()
 
     @property
     def humidity_and_temperature(self):
@@ -278,8 +207,8 @@ class HumiGadget(object):
         humi = self.humidity
         if humi is None:
             return None
-        return dict(zip(self.RHT_FORMAT, (humi['time'], humi['humidity'],
-                                          temp['temperature'])))
+        return dict(zip(self.RHT_FORMAT, (humi['time'], temp['temperature'],
+                                          humi['humidity'])))
 
     @property
     def temperature(self):
@@ -315,8 +244,9 @@ class HumiGadget(object):
                       'battery': battery_percentage
                   } or None on error
         """
-        return self.read_characteristic(self.BAT_CHAR_UUID, '<B',
-                                        self.BAT_FORMAT)
+        read_char = self.read_characteristic(self.BAT_CHAR_UUID, '<B',
+                                             self.BAT_FORMAT)
+        return self._loop.run_until_complete(read_char)
 
 
 class SHT3xHumiGadget(HumiGadget):
@@ -330,26 +260,29 @@ class SHT3xHumiGadget(HumiGadget):
     LOG_INTV_FORMAT = ['time', 'log_interval']
 
     def __init__(self, *args, **kwargs):
-        super(SHT3xHumiGadget, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self._current_rht = {}
 
     @property
     def temperature(self):
-        return self.read_characteristic(self.TEMP_NOTI_UUID, '<f',
-                                        self.TEMP_FORMAT)
+        read_char = self.read_characteristic(self.TEMP_NOTI_UUID, '<f',
+                                             self.TEMP_FORMAT)
+        return self._loop.run_until_complete(read_char)
 
     @property
     def humidity(self):
-        return self.read_characteristic(self.HUMI_NOTI_UUID, '<f',
-                                        self.HUMI_FORMAT)
+        read_char = self.read_characteristic(self.HUMI_NOTI_UUID, '<f',
+                                             self.HUMI_FORMAT)
+        return self._loop.run_until_complete(read_char)
 
     @property
     def log_interval(self):
         """
         :returns: the logging and notification interval in ms
         """
-        return self.read_characteristic(self.LOG_INTV_CHAR_UUID, '<i',
-                                        self.LOG_INTV_FORMAT)
+        read_char = self.read_characteristic(self.LOG_INTV_CHAR_UUID, '<i',
+                                             self.LOG_INTV_FORMAT)
+        return self._loop.run_until_complete(read_char)
 
     @log_interval.setter
     def log_interval(self, interval_ms):
@@ -420,8 +353,10 @@ class SHTC1HumiGadget(HumiGadget):
 
     @property
     def humidity_and_temperature(self):
-        return self.read_characteristic(self.RHT_CHAR_UUID, self._unpack_fixp,
-                                        self.RHT_FORMAT)
+        read_char = self.read_characteristic(self.RHT_CHAR_UUID,
+                                             self._unpack_fixp,
+                                             self.RHT_FORMAT)
+        return self._loop.run_until_complete(read_char)
 
     @property
     def temperature(self):
@@ -460,63 +395,53 @@ class SHTC1HumiGadget(HumiGadget):
             self.unsubscribe_service(self.RHT_CHAR_UUID)
 
 
+def main():
+    loop = asyncio.get_event_loop()
+    device_array = loop.run_until_complete(scan())
+    devices = HumiGadget.filter_smartgadgets(device_array)
+
+    # # # Manually set devices
+    # devices = [
+    # #     {'Address': 'BC:6A:29:C1:B4:D1', 'Name': 'SHTC1'},
+    # #    {'Address': 'DC:01:F6:33:D7:42', 'Name': 'Smart Humigadget'}
+    # {'Name': 'Smart Humigadget', 'Paired': False, 'ServicesResolved':
+    #          False, 'Adapter': '/org/bluez/hci0', 'Appearance': 512,
+    #          'LegacyPairing': False, 'Alias': 'Smart Humigadget',
+    #          'Connected': False, 'UUIDs':
+    #          ['00001234-b38d-4985-720e-0f993a68ee41',
+    #              '00001800-0000-1000-8000-00805f9b34fb',
+    #              '00001801-0000-1000-8000-00805f9b34fb',
+    #              '0000180a-0000-1000-8000-00805f9b34fb',
+    #              '0000180f-0000-1000-8000-00805f9b34fb',
+    #              '00002234-b38d-4985-720e-0f993a68ee41',
+    #              '0000f234-b38d-4985-720e-0f993a68ee41'], 'Address':
+    #          'DC:01:F6:33:D7:42', 'Trusted': False, 'Blocked': False}
+    # ]
+
+    for dev in devices:
+        print("{}: {}".format(dev.name, dev.address))
+        #try:
+        with HumiGadget.create(dev, loop=loop) as gadget:
+            print("Connected ... rssi, bat, rht, log intv")
+            print(gadget.rssi)
+            print(gadget.battery)
+            print(gadget.humidity_and_temperature)
+
+            if isinstance(gadget, SHT3xHumiGadget):
+                print(gadget.log_interval)
+
+            # # print("Setting log interval (erases log)")
+            # # gadget.log_interval = 5000
+            # print("Subscribing")
+            # gadget.subscribe(lambda rht: print(rht))
+            # time.sleep(70)
+
+        #except KeyboardInterrupt:
+        #    break
+        #except Exception as e:
+        #    print(e)
+        #    raise e
+
+
 if __name__ == '__main__':
-    # TODO: REMOVE THIS SECTION WHEN THE MOVE TO PYGATT-BLUEZ IS COMPLETE
-    # AS PYGATT-GATTTOOL MAY NOT BE WORKING ANYMORE, USE PYGATT-BLUEZ
-    #
-    # General usage tips when running with the gatttool pygatt backend:
-    # Run this command to allow LE scan as unprivileged user
-    # sudo setcap 'cap_net_raw,cap_net_admin+eip' `which hcitool`
-    # When running into scanning issues or connection timeouts try restarting
-    # the linux bluetooth service:
-    # sudo /etc/init.d/bluetooth restart # for sysv
-    # sudo service bluetooth restart     # for upstart (Ubuntu < 16.04)
-    # sudo systemctl restart bluetooth   # for systemd (Ubuntu >= 16.04)
-    #
-    with BLEAdapter() as ble:
-        # # Scan devices
-        devices = HumiGadget.filter_smartgadgets(ble.scan())
-        print("Devices:")
-        print(devices)
-
-        # # # Manually set devices
-        # devices = [
-        # #     {'Address': 'BC:6A:29:C1:B4:D1', 'Name': 'SHTC1'},
-        # #    {'Address': 'DC:01:F6:33:D7:42', 'Name': 'Smart Humigadget'}
-        # {'Name': 'Smart Humigadget', 'Paired': False, 'ServicesResolved':
-        #          False, 'Adapter': '/org/bluez/hci0', 'Appearance': 512,
-        #          'LegacyPairing': False, 'Alias': 'Smart Humigadget',
-        #          'Connected': False, 'UUIDs':
-        #          ['00001234-b38d-4985-720e-0f993a68ee41',
-        #              '00001800-0000-1000-8000-00805f9b34fb',
-        #              '00001801-0000-1000-8000-00805f9b34fb',
-        #              '0000180a-0000-1000-8000-00805f9b34fb',
-        #              '0000180f-0000-1000-8000-00805f9b34fb',
-        #              '00002234-b38d-4985-720e-0f993a68ee41',
-        #              '0000f234-b38d-4985-720e-0f993a68ee41'], 'Address':
-        #          'DC:01:F6:33:D7:42', 'Trusted': False, 'Blocked': False}
-        # ]
-
-        for dev in devices:
-            print("{}: {}".format(dev['Name'], dev['Address']))
-            #try:
-            with HumiGadget.create(dev, ble) as gadget:
-                print("Connected ... rssi, bat, rht, log intv")
-                print(gadget.rssi)
-                print(gadget.battery)
-                print(gadget.humidity_and_temperature)
-
-                if isinstance(gadget, SHT3xHumiGadget):
-                    print(gadget.log_interval)
-
-                # print("Setting log interval (erases log)")
-                # gadget.log_interval = 5000
-                print("Subscribing")
-                gadget.subscribe(lambda rht: print(rht))
-                time.sleep(70)
-
-            #except KeyboardInterrupt:
-            #    break
-            #except Exception as e:
-            #    print(e)
-            #    raise e
+    main()

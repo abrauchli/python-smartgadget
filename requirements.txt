@@ -1,2 +1,1 @@
-pydbus>=0.6.0
-pygatt[bluez]>=2.1.0
+bleak~=0.10.0
