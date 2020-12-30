@@ -40,46 +40,40 @@ async def scan():
 
 log = logging.getLogger(__name__)
 
+SHTC1_NAME = 'SHTC1 smart gadget'
+SHT3X_NAME = 'Smart Humigadget'
+GADGET_NAMES = [SHTC1_NAME, SHT3X_NAME]
 
-class HumiGadget:
+
+def filter_smartgadgets(devicelist):
+    return [dev for dev in devicelist if dev.name in GADGET_NAMES]
+
+
+def create_gadget(device, client=None, loop=None):
+    """Factory method for creating a humigadget from a BLE Device"""
+    if device.name == SHTC1_NAME:
+        return SHTC1HumiGadget(device, client, loop)
+
+    if device.name == SHT3X_NAME:
+        return SHT3xHumiGadget(device, client, loop)
+
+    return None
+
+
+class Gadget:
     """
-    Representation of a Sensirion SmartHumiGadget.
+    Representation of a Sensirion BLE Gadget.
 
     Abstract Class with factory method `create'
     """
-
     RSSI_FORMAT = ['time', 'rssi']
-    HUMI_FORMAT = ['time', 'humidity']
-    TEMP_FORMAT = ['time', 'temperature']
-    RHT_FORMAT = ['time', 'temperature', 'humidity']
-    BAT_FORMAT = ['time', 'battery']
-    SHTC1_NAME = 'SHTC1 smart gadget'
-    SHT3X_NAME = 'Smart Humigadget'
-    GADGET_NAMES = [SHTC1_NAME, SHT3X_NAME]
-
-    BAT_SRVC_UUID = '0000180f-0000-1000-8000-00805f9b34fb'
-    BAT_CHAR_UUID = '00002a19-0000-1000-8000-00805f9b34fb'
     ADDRESS_TYPE = 'random'
 
-    @staticmethod
-    def filter_smartgadgets(devicelist):
-        return [dev for dev in devicelist
-                if dev.name in HumiGadget.GADGET_NAMES]
-
-    @staticmethod
-    def create(device, client=None, loop=None):
-        """Factory method for creating a humigadget from a BLE Device"""
-        if device.name == HumiGadget.SHTC1_NAME:
-            return SHTC1HumiGadget(device, client, loop)
-
-        if device.name == HumiGadget.SHT3X_NAME:
-            return SHT3xHumiGadget(device, client, loop)
-
-        return None
-
     def __init__(self, device, client=None, loop=None, *args, **kwargs):
-        super().__init__(*args, **kwargs)
         self.device = device
+        self.subscribable_services = set()
+        self.subscribed_services = set()
+        self._callbacks = []
 
         # self.device.get_rssi() is only available on MacOS at the time of
         # writing, so we keep it static
@@ -87,11 +81,11 @@ class HumiGadget:
         self._rssi = dict(zip(self.RSSI_FORMAT, rssi))
 
         self._client = client or BleakClient(device)
-        self._client.set_disconnected_callback(self._disconnected_client)
+        self._client.set_disconnected_callback(self._on_disconnected)
+
+        self._handle_char_dict = None
 
         self._loop = loop or asyncio.get_event_loop()
-
-        self.rht_callbacks = []
 
     def __enter__(self):
         self.connect()
@@ -100,21 +94,23 @@ class HumiGadget:
     def __exit__(self, type_cls, value, traceback):
         self.disconnect()
 
-    def _disconnected_client(self, client):
+    def _on_disconnected(self, client):
         self._client = None
+        self._handle_char_dict = None
+
+    def _on_notify(self, handle, data):
+        pass
 
     def connect(self):
-        return self._loop.run_until_complete(self._client.connect())
+        self._loop.run_until_complete(self._client.connect())
+        services = self._loop.run_until_complete(self._client.get_services())
+        self._handle_char_dict = services.characteristics
 
     def disconnect(self):
         if self._client:
-            if self.rht_callbacks:
-                self.unsubscribe()
-
-            return self._loop.run_until_complete(self._client.disconnect())
+            self._loop.run_until_complete(self._client.disconnect())
 
         self._client = None
-        self.rht_callbacks = []
 
     async def read_characteristic(self, uuid, unpack, zip_keys):
         """
@@ -147,31 +143,59 @@ class HumiGadget:
         return dict(zip(zip_keys, zip_vals))
 
     def write_characteristic(self, uuid, val):
-        return self._con.char_write(uuid, val)
+        return self._loop.run_until_complete(self._client.write_gatt_char, uuid,
+                                             val)
 
     def subscribe_service(self, uuid, callback):
-        self._con.subscribe(uuid, callback)
+        self._loop.run_until_complete(self._client.start_notify(uuid,
+                                      callback))
 
     def unsubscribe_service(self, uuid):
-        self._con.unsubscribe(uuid)
+        self._loop.run_until_complete(self._client.stop_notify(uuid))
 
     def subscribe(self, callback):
         """
-        Subscribe to periodic RHT values from the gadget
+        Subscribe to periodic measurement values from the gadget
 
         :param callback: is called at regular intervals with the same dict as
-                         from humidity_and_temperature.
+                         the expected property (e.g. from
+                         `humidity_and_temperature` for a HumiGadget)
         """
-        raise NotImplementedError()
+        if callback not in self._callbacks:
+            self._callbacks.append(callback)
+
+        if len(self._callbacks) == 1:
+            # start service subscription with the first bound callback
+            for s in self.subscribable_services:
+                try:
+                    self.subscribe_service(s, self._on_notify)
+                    self.subscribed_services.add(s)
+                except Exception:
+                    pass
 
     def unsubscribe(self, callback=None):
         """
-        Unsubscribe from periodic RHT values from the gadget
+        Unsubscribe from periodic measurement values from the gadget
 
-        :param callback: Unsubscribe a specific callback or all if callback is
-                         None.
+        :param callback: Unsubscribe a specific callback or from all if callback
+                         is `None`.
         """
-        raise NotImplementedError()
+        if not self._callbacks:
+            return
+
+        if callback:
+            self._callbacks.append(callback)
+        else:
+            self._callbacks = []
+
+        if not self.rht_callbacks:
+            # unsubscribe service when releasing the last callback
+            for s in self.subscribed_services:
+                try:
+                    self.unsubscribe_service(s)
+                    self.subscribed_services.remove(s)
+                except Exception:
+                    log.exception("Error unsubscribing service %s", s)
 
     @property
     def address(self):
@@ -186,9 +210,113 @@ class HumiGadget:
         """
         Current connection state
 
-        :returns: True if the gadget is connected, False otherwise
+        :returns: `True` if the gadget is connected, `False` otherwise
         """
         return self._client.is_connected()
+
+
+class BatteryServiceMixin:
+    BAT_SERV_UUID = '0000180f-0000-1000-8000-00805f9b34fb'
+    BAT_CHAR_UUID = '00002a19-0000-1000-8000-00805f9b34fb'
+    BAT_FORMAT = ['time', 'battery']
+
+    @property
+    def battery(self):
+        """
+        Get the last battery value
+
+        :returns: a dict {
+                      'time': timestamp,
+                      'battery': battery_percentage
+                  } or None on error
+        """
+        read_char = self.read_characteristic(self.BAT_CHAR_UUID, '<B',
+                                             self.BAT_FORMAT)
+        return self._loop.run_until_complete(read_char)
+
+
+class HumidityServiceMixin:
+    HUMI_SERV_UUID = '00001234-b38d-4985-720e-0f993a68ee41'
+    HUMI_NOTI_UUID = '00001235-b38d-4985-720e-0f993a68ee41'
+    HUMI_FORMAT = ['time', 'humidity']
+
+    def __init__(self, *args, **kwargs):
+        self.subscribable_services |= self.HUMI_NOTI_UUID
+
+    @property
+    def humidity(self):
+        """
+        Get the last temperature value
+
+        :returns: a dict {
+                      'time': timestamp,
+                      'humidity': relative_humidity_in_percent,
+                  } or None on error
+        """
+        read_char = self.read_characteristic(self.HUMI_NOTI_UUID, '<f',
+                                             self.HUMI_FORMAT)
+        return self._loop.run_until_complete(read_char)
+
+
+class TemperatureServiceMixin:
+    TEMP_SERV_UUID = '00002234-b38d-4985-720e-0f993a68ee41'
+    TEMP_NOTI_UUID = '00002235-b38d-4985-720e-0f993a68ee41'
+    TEMP_FORMAT = ['time', 'temperature']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.subscribable_services |= self.TEMP_NOTI_UUID
+
+    @property
+    def temperature(self):
+        """
+        Get the last temperature value
+
+        :returns: a dict {
+                      'time': timestamp,
+                      'temperature': temperature_in_degC
+                  } or None on error
+        """
+        read_char = self.read_characteristic(self.TEMP_NOTI_UUID, '<f',
+                                             self.TEMP_FORMAT)
+        return self._loop.run_until_complete(read_char)
+
+
+class HumidityAndTemperatureServiceMixin:
+    RHT_SERV_UUID = '0000aa20-0000-1000-8000-00805f9b34fb'
+    RHT_CHAR_UUID = '0000aa21-0000-1000-8000-00805f9b34fb'
+    RHT_FORMAT = ['time', 'temperature', 'humidity']
+
+    def __init__(self, *args, **kwargs):
+        self.subscribable_services |= self.RHT_CHAR_UUID
+
+    @staticmethod
+    def _rht_unpack_fixp(data):
+        vals = struct.unpack('<hh', data)
+        return (vals[0] / 100., vals[1] / 100.)
+
+    @property
+    def humidity_and_temperature(self):
+        read_char = self.read_characteristic(self.RHT_CHAR_UUID,
+                                             self._rht_unpack_fixp,
+                                             self.RHT_FORMAT)
+        return self._loop.run_until_complete(read_char)
+
+    @property
+    def temperature(self):
+        return self.humidity_and_temperature
+
+    @property
+    def humidity(self):
+        return self.humidity_and_temperature
+
+
+class HumidityAndTemperatureVirtualServiceMixin:
+    """ Provides a compatibility layer for the combined RHT readout when
+    retrieving is only supported individually.
+    Requires a base object hat implements both TemperatureServiceMixin and
+    HumidityServiceMixin"""
+    RHT_FORMAT = ['time', 'temperature', 'humidity']
 
     @property
     def humidity_and_temperature(self):
@@ -210,70 +338,10 @@ class HumiGadget:
         return dict(zip(self.RHT_FORMAT, (humi['time'], temp['temperature'],
                                           humi['humidity'])))
 
-    @property
-    def temperature(self):
-        """
-        Get the last temperature value
 
-        :returns: a dict {
-                      'time': timestamp,
-                      'temperature': temperature_in_degC
-                  } or None on error
-        """
-        raise NotImplementedError()
-
-    @property
-    def humidity(self):
-        """
-        Get the last temperature value
-
-        :returns: a dict {
-                      'time': timestamp,
-                      'humidity': relative_humidity_in_percent,
-                  } or None on error
-        """
-        raise NotImplementedError()
-
-    @property
-    def battery(self):
-        """
-        Get the last battery value
-
-        :returns: a dict {
-                      'time': timestamp,
-                      'battery': battery_percentage
-                  } or None on error
-        """
-        read_char = self.read_characteristic(self.BAT_CHAR_UUID, '<B',
-                                             self.BAT_FORMAT)
-        return self._loop.run_until_complete(read_char)
-
-
-class SHT3xHumiGadget(HumiGadget):
-    """Representation of a Sensirion Smart SHT3x HumiGadget."""
-
-    TEMP_SRVC_UUID = '00002234-b38d-4985-720e-0f993a68ee41'
-    HUMI_SRVC_UUID = '00001234-b38d-4985-720e-0f993a68ee41'
-    TEMP_NOTI_UUID = '00002235-b38d-4985-720e-0f993a68ee41'
-    HUMI_NOTI_UUID = '00001235-b38d-4985-720e-0f993a68ee41'
+class LoggingServiceMixin:
     LOG_INTV_CHAR_UUID = '0000f239-b38d-4985-720e-0f993a68ee41'
     LOG_INTV_FORMAT = ['time', 'log_interval']
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._current_rht = {}
-
-    @property
-    def temperature(self):
-        read_char = self.read_characteristic(self.TEMP_NOTI_UUID, '<f',
-                                             self.TEMP_FORMAT)
-        return self._loop.run_until_complete(read_char)
-
-    @property
-    def humidity(self):
-        read_char = self.read_characteristic(self.HUMI_NOTI_UUID, '<f',
-                                             self.HUMI_FORMAT)
-        return self._loop.run_until_complete(read_char)
 
     @property
     def log_interval(self):
@@ -294,17 +362,24 @@ class SHT3xHumiGadget(HumiGadget):
                                          bytearray(struct.pack('<i',
                                                                interval_ms)))
 
-    def _on_propchange(self, iface, changed, invalidated,
-                       service=None, uuid=None):
-        if 'Value' not in changed:
-            return
+
+class SHT3xHumiGadget(Gadget, TemperatureServiceMixin, HumidityServiceMixin,
+                      HumidityAndTemperatureVirtualServiceMixin,
+                      LoggingServiceMixin, BatteryServiceMixin):
+    """Representation of a Sensirion Smart SHT3x HumiGadget."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._current_rht = {}
+
+    def _on_notify(self, handle, data):
         ts = time.time()
-        data = bytearray(changed['Value'])
         val = struct.unpack('<f', data)[0]
         key = 'value'
-        if uuid == self.TEMP_NOTI_UUID:
+        char_uuid = self._handle_char_dict[handle].uuid
+        if char_uuid == self.TEMP_NOTI_UUID:
             key = 'temperature'
-        elif uuid == self.HUMI_NOTI_UUID:
+        elif char_uuid == self.HUMI_NOTI_UUID:
             key = 'humidity'
         self._current_rht['time'] = ts
         self._current_rht[key] = val
@@ -314,91 +389,24 @@ class SHT3xHumiGadget(HumiGadget):
                 s(self._current_rht)
             self._current_rht = {}
 
-    def subscribe(self, callback):
-        if callback not in self.rht_callbacks:
-            self.rht_callbacks.append(callback)
 
-        if len(self.rht_callbacks) == 1:
-            # start service subscription with the first bound callback
-            self._current_rht = {}
-            self.subscribe_service(self.TEMP_NOTI_UUID, self._on_propchange)
-            self.subscribe_service(self.HUMI_NOTI_UUID, self._on_propchange)
-
-    def unsubscribe(self, callback=None):
-        if not self.rht_callbacks:
-            return
-
-        if callback:
-            self.rht_callbacks.remove(callback)
-        else:
-            self.rht_callbacks = []
-
-        if not self.rht_callbacks:
-            # unsubscribe service when releasing the last callback
-            self.unsubscribe_service(self.TEMP_NOTI_UUID)
-            self.unsubscribe_service(self.HUMI_NOTI_UUID)
-
-
-class SHTC1HumiGadget(HumiGadget):
+class SHTC1HumiGadget(Gadget, HumidityAndTemperatureServiceMixin):
     """Representation of a Sensirion Smart SHTC1 HumiGadget."""
 
-    RHT_SRVC_UUID = '0000aa20-0000-1000-8000-00805f9b34fb'
-    RHT_CHAR_UUID = '0000aa21-0000-1000-8000-00805f9b34fb'
     ADDRESS_TYPE = 'public'
 
-    @staticmethod
-    def _unpack_fixp(data):
-        vals = struct.unpack('<hh', data)
-        return (vals[0] / 100., vals[1] / 100.)
-
-    @property
-    def humidity_and_temperature(self):
-        read_char = self.read_characteristic(self.RHT_CHAR_UUID,
-                                             self._unpack_fixp,
-                                             self.RHT_FORMAT)
-        return self._loop.run_until_complete(read_char)
-
-    @property
-    def temperature(self):
-        return self.humidity_and_temperature
-
-    @property
-    def humidity(self):
-        return self.humidity_and_temperature
-
-    def _on_rht_value(self, handle, data):
+    def _on_notify(self, handle, data):
         vals = [time.time()]
-        vals.extend(self._unpack_fixp(data))
+        vals.extend(self._rht_unpack_fixp(data))
         cur_rht = dict(zip(self.RHT_FORMAT, vals))
         for s in self.rht_callbacks:
             s(cur_rht)
-
-    def subscribe(self, callback):
-        if callback not in self.rht_callbacks:
-            self.rht_callbacks.append(callback)
-
-        if len(self.rht_callbacks) == 1:
-            # start service subscription with the first bound callback
-            self.subscribe_service(self.RHT_CHAR_UUID, self._on_rht_value)
-
-    def unsubscribe(self, callback=None):
-        if not self.rht_callbacks:
-            return
-
-        if callback:
-            self.rht_callbacks.remove(callback)
-        else:
-            self.rht_callbacks = []
-
-        if not self.rht_callbacks:
-            # unsubscribe service when releasing the last callback
-            self.unsubscribe_service(self.RHT_CHAR_UUID)
 
 
 def main():
     loop = asyncio.get_event_loop()
     device_array = loop.run_until_complete(scan())
-    devices = HumiGadget.filter_smartgadgets(device_array)
+    devices = filter_smartgadgets(device_array)
 
     # # # Manually set devices
     # devices = [
@@ -421,7 +429,7 @@ def main():
     for dev in devices:
         print("{}: {}".format(dev.name, dev.address))
         #try:
-        with HumiGadget.create(dev, loop=loop) as gadget:
+        with create_gadget(dev, loop=loop) as gadget:
             print("Connected ... rssi, bat, rht, log intv")
             print(gadget.rssi)
             print(gadget.battery)
@@ -432,9 +440,9 @@ def main():
 
             # # print("Setting log interval (erases log)")
             # # gadget.log_interval = 5000
-            # print("Subscribing")
-            # gadget.subscribe(lambda rht: print(rht))
-            # time.sleep(70)
+            print("Subscribing")
+            gadget.subscribe(lambda rht: print(rht))
+            time.sleep(10)
 
         #except KeyboardInterrupt:
         #    break
